@@ -1,6 +1,8 @@
+# nut-plus - Network UPS Tools (NUT) plus E-Mail notifications and WoL support oriented towards use with Portainer
+
 This Docker implementation of Network UPS Tools is oriented towards use with Portainer via a Docker Compose YAML. Installation can typically be done using only env vars.
 
-This implementaion includes, e-mail notification support for "on batt" and "online" UPS events. Integration with bnhf/wolweb is also supported for waking one or more hosts x seconds after power is restored.
+This implementaion includes, e-mail notification support for "on batt" and "online" UPS events. Integration with bnhf/wolweb is also supported for waking one or more hosts x seconds after power is restored via WoL.
 
 The YAML below is intended to be self-documenting, and typically requires no editing. The `Environment variables` section of Portainer should be used for all of your installation-specific values:
 
