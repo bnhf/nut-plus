@@ -1,0 +1,37 @@
+#!/bin/bash
+# upssched-cmd
+# 2025.08.27
+
+sendMail() {
+  local emailSubject=$(echo "$HOSTNAME UPS ${UPSNAME%@*} $1")
+  local emailBody=$(upsc $UPSNAME)
+
+  { printf 'To: %s\n' "$NOTIFICATION_EMAIL"
+    printf 'From: %s\n' "$SMTP_GMAIL"
+    printf 'Subject: %s\n' "$emailSubject"
+    printf '\n%s\n' "$emailBody"
+  } | msmtp -t 2>&1 | logger -t upssched-cmd
+}
+
+# NUT changes the value of $UPSNAME in upssched-cmd to $UPSNAME@localhost.
+case "$1" in
+  on_battery)
+    # Send commands to UPS to set a shutdown delay and to shutdown after that delay.
+    [[ -n $NOTIFYFLAG_ONBATT ]] \
+      && upsrw -u "$NUT_USER" -p "$NUT_PASSWORD" -s "ups.delay.shutdown=$UPS_DELAY_SHUTDOWN" "$UPSNAME" 2>&1 | logger -t ups-shutdown
+    [[ -n $NOTIFYFLAG_ONBATT ]] \
+      && upscmd -u "$NUT_USER" -p "$NUT_PASSWORD" "$UPSNAME" "shutdown.return" 2>&1 | logger -t ups-shutdown
+    sendMail "Power Failure!"
+    ;;
+  power_restored)
+    # Send command to cancel UPS shutdown.
+    [[ -n $NOTIFYFLAG_ONLINE ]] \
+      && upscmd -u "$NUT_USER" -p "$NUT_PASSWORD" "$UPSNAME" "shutdown.stop" 2>&1 | logger -t ups-shutdown
+    sendMail "Power has returned"
+    ;;
+  shutdown_now)
+    # Tell upsmon to declare FSD; slaves see FSD and begin shutdown.
+    sendMail "initiated Shutdown Sequence"
+    upsmon -c fsd
+    ;;
+esac
