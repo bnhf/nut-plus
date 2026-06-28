@@ -1,9 +1,14 @@
-#docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 -f Dockerfile -t bnhf/nut-plus:latest -t bnhf/nut-plus:2025.08.29 . --push --no-cache
+#BUILD_DATE=$(date +%Y.%m.%d) && docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 -f Dockerfile -t bnhf/nut-plus:latest -t bnhf/nut-plus:$BUILD_DATE --build-arg BUILD_DATE=$BUILD_DATE . --push --no-cache
 FROM alpine:3.22
+LABEL maintainer="Scott Ueland (https://github.com/bnhf)"
+
+ARG BUILD_DATE
+LABEL version="${BUILD_DATE}"
 
 ENV NUT_QUIET_INIT_UPSNOTIFY=true \
     TLS_FILE=/etc/ssl/cert.pem \
     MSMTP_LOG=-
+ENV NUT_PLUS_VERSION=${BUILD_DATE:-unknown}
 
 # Install required packages
 RUN apk add --no-cache \
@@ -16,7 +21,7 @@ RUN apk add --no-cache \
   gawk sed \
   tzdata dbus \
   syslog-ng busybox-openrc \
-  msmtp ca-certificates \
+  msmtp ca-certificates curl jq \
   && rc-update add syslog boot \
   && mkdir -p /opt/nut /var/run/nut/upssched \
   && chmod 700 /var/run/nut

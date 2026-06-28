@@ -1,0 +1,73 @@
+#!/bin/bash
+# testemail
+# 2026.06.28
+
+# Email configuration test -- sends a real test email and validates the full chain.
+# Run via: docker exec nut-plus /etc/nut/testemail
+# Results are printed to stdout.
+
+log_event() {
+  echo "$(date -u '+%b %e %H:%M:%S') $HOSTNAME $1"
+}
+
+errors=0
+
+log_event "testemail: Starting email configuration check"
+
+# Check msmtp config file exists
+if [ -f /etc/msmtprc ]; then
+  log_event "testemail: OK - msmtp config file exists"
+else
+  log_event "testemail: ERROR - /etc/msmtprc not found -- check SMTP_GMAIL and GMAIL_APP_PASSWD env vars"
+  errors=$((errors + 1))
+fi
+
+# Check SMTP_GMAIL is set
+if [ -n "$SMTP_GMAIL" ]; then
+  log_event "testemail: OK - SMTP_GMAIL is set to $SMTP_GMAIL"
+else
+  log_event "testemail: ERROR - SMTP_GMAIL is not set"
+  errors=$((errors + 1))
+fi
+
+# Check GMAIL_APP_PASSWD is set
+if [ -n "$GMAIL_APP_PASSWD" ]; then
+  log_event "testemail: OK - GMAIL_APP_PASSWD is set"
+else
+  log_event "testemail: ERROR - GMAIL_APP_PASSWD is not set"
+  errors=$((errors + 1))
+fi
+
+# Check NOTIFICATION_EMAIL is set
+if [ -n "$NOTIFICATION_EMAIL" ]; then
+  log_event "testemail: OK - NOTIFICATION_EMAIL is set to $NOTIFICATION_EMAIL"
+else
+  log_event "testemail: ERROR - NOTIFICATION_EMAIL is not set"
+  errors=$((errors + 1))
+fi
+
+# Send test email if all checks passed
+if [ $errors -eq 0 ]; then
+  log_event "testemail: Sending test email to $NOTIFICATION_EMAIL"
+  send_result=$( { printf 'To: %s\n' "$NOTIFICATION_EMAIL"
+    printf 'From: %s\n' "$SMTP_GMAIL"
+    printf 'Subject: nut-plus Test Email from %s\n' "$(hostname)"
+    printf '\nThis is a test email from nut-plus on %s. Sent at %s.\n' "$(hostname)" "$(date)"
+  } | msmtp -t 2>&1 )
+  send_exit=$?
+  if [ $send_exit -eq 0 ]; then
+    log_event "testemail: OK - Test email sent successfully -- check $NOTIFICATION_EMAIL for the test message"
+  else
+    log_event "testemail: ERROR - msmtp failed (exit $send_exit): $send_result"
+    errors=$((errors + 1))
+  fi
+fi
+
+# Summary
+if [ $errors -eq 0 ]; then
+  log_event "testemail: All checks passed"
+else
+  log_event "testemail: $errors check(s) failed -- review entries above"
+fi
+
+exit $errors

@@ -1,26 +1,34 @@
 #!/bin/bash
 # start.sh
-# 2025.08.28
+# 2026.06.28
 
 #set -x
 
+LATEST_COMPOSE=2026.06.28
+
+log_event() {
+  echo "$(date -u '+%b %e %H:%M:%S') $HOSTNAME $1"
+}
+
 [[ "$NUT_DRIVER" == "scanner" ]] && nutDriver="" || nutDriver="$NUT_DRIVER"
 
-# Check if /etc/nut files exist, and copy them from /opt/apcupsd if they don't
-files=( nut.conf ups.conf upsd.conf upsd.users upsmon.conf upssched.conf upssched-cmd )
+log_event "start.sh: Container starting"
+
+# Check if /etc/nut files exist, and copy them from /opt/nut if they don't
+files=( nut.conf ups.conf upsd.conf upsd.users upsmon.conf upssched.conf upssched-cmd testemail testshutdown )
 
 for file in "${files[@]}"; do
   if [ ! -f /etc/nut/$file ] || [[ $UPDATE_CONFIGS == "true" ]]; then
     cp /opt/nut/$file /etc/nut/$file \
     && chmod 600 /etc/nut/$file \
     && sed -i '0,/\b\(example\|Example\|sample\)\s\?/s///' /etc/nut/$file \
-    && echo "No existing $file found or UPDATE_CONFIGS set to true"
+    && log_event "start.sh: Copied $file (new or UPDATE_CONFIGS=true)"
   else
-    echo "Existing $file found, and will be used"
+    log_event "start.sh: Using existing $file"
   fi
 done
 
-chmod +x /etc/nut/*-cmd
+chmod +x /etc/nut/*-cmd /etc/nut/test*
 
 echo -e "\n----------------------------------------\n"
 
@@ -47,6 +55,7 @@ modifyConfFiles() {
   {  printf 's|^  port =.*|  port = %s|\n' "$NUT_USB"
     [[ -n $nutDriver ]] && printf 's|^  driver =.*|  driver = %s|\n' "$nutDriver"
     [[ -n $BATTERY_RUNTIME_LOW ]] && printf '/^  driver =/a\\\n  override.battery.runtime.low = %s\n' "$BATTERY_RUNTIME_LOW"
+    [[ -n $BATTERY_CHARGE_LOW ]] && printf '/^  driver =/a\\\n  override.battery.charge.low = %s\n' "$BATTERY_CHARGE_LOW"
   } | sed -i -f - /etc/nut/ups.conf
 
   echo -e "\n----------------------------------------\n"
@@ -81,6 +90,8 @@ modifyConfFiles() {
     [ -n "$NOTIFYFLAG_ONLINE" ] && printf 's|^# NOTIFYFLAG ONLINE.*|NOTIFYFLAG ONLINE     %s|\n' "$NOTIFYFLAG_ONLINE"
     [ -n "$NOTIFYFLAG_LOWBATT" ] && printf 's|^# NOTIFYFLAG LOWBATT.*|NOTIFYFLAG LOWBATT    %s|\n' "$NOTIFYFLAG_LOWBATT"
     printf 's|^FINALDELAY.*|FINALDELAY %s|\n' "$FINALDELAY"
+    printf 's|^HOSTSYNC .*|HOSTSYNC %s|\n' "$HOSTSYNC"
+    [ -n "$POLLTIME" ] && printf 's|^POLLFREQ .*|POLLFREQ %s|\n' "$POLLTIME"
   } | sed -i -f - /etc/nut/upsmon.conf
 
   { printf '/^RUN_AS_USER/i\\\n\n'
@@ -96,6 +107,7 @@ modifyConfFiles() {
     printf '/^#   AT ONLINE . CANCEL-TIMER/a\\\nAT ONLINE * CANCEL-TIMER shutdown_now\n'
     printf '/^#   AT ONBATT . START-TIMER/a\\\nAT ONBATT * EXECUTE on_battery\n'
     printf '/^#   AT ONBATT . START-TIMER/a\\\nAT ONBATT * START-TIMER shutdown_now %s\n' "$SYSTEM_DELAY_SHUTDOWN"
+    printf '/^#   AT ONBATT . START-TIMER/a\\\nAT LOWBATT * EXECUTE shutdown_now\n'
   } | sed -i -f - /etc/nut/upssched.conf
 
   { printf '/^PIPEFN/i\\\n\n'
@@ -141,25 +153,38 @@ sendMail() {
   } | msmtp -t 2>&1 | logger -t upssched-cmd
 }
 
-if [ -f /etc/nut/killpower ] && [[ $POWER_RESTORED_EMAIL == "true" ]]; then
-  ( sleep 10 ; sendMail "Power has returned" ) &
+# Capture power failure state before removing the killpower flag
+POWER_FAILURE_RESTART=false
+if [ -f /etc/nut/killpower ]; then
+  POWER_FAILURE_RESTART=true
+  log_event "start.sh: Power failure restart detected -- killpower flag found"
+  rm -f /etc/nut/killpower
+  log_event "start.sh: killpower flag removed"
 fi
 
-# Systems to wake using WoLweb on startup (with delay in seconds)
-wolweb_wakeups=( $WOLWEB_HOSTNAMES )
+if [ "$POWER_FAILURE_RESTART" == "true" ] && [[ $POWER_RESTORED_EMAIL == "true" ]]; then
+  ( sleep 10 ; sendMail "Power has returned" ) &
+  log_event "start.sh: Power restored -- notification email scheduled (POWER_RESTORED_EMAIL=$POWER_RESTORED_EMAIL)"
+fi
 
-for wolweb_wakeup in "${wolweb_wakeups[@]}"
-  do
-    if [ ! -z $WOLWEB_HOSTNAMES ]; then
-      ( sleep $WOLWEB_DELAY ; curl -s http://$WOLWEB_PATH_BASE/$wolweb_wakeup ) &
+# Systems to wake using WoLweb after power failure restart only (with delay in seconds)
+if [ "$POWER_FAILURE_RESTART" == "true" ]; then
+  wolweb_wakeups=( $WOLWEB_HOSTNAMES )
+  for wolweb_wakeup in "${wolweb_wakeups[@]}"; do
+    if [ -n "$WOLWEB_HOSTNAMES" ]; then
+      ( sleep $WOLWEB_DELAY
+        response=$(curl -s http://$WOLWEB_PATH_BASE/$wolweb_wakeup)
+        log_event "start.sh: WoLweb wake $wolweb_wakeup: $response (WOLWEB_DELAY=${WOLWEB_DELAY}s)"
+      ) &
     fi
   done
+fi
 
-# Initiate nut-upsd packages
-rc-status
-touch /run/openrc/softlevel
+# Start NUT services
+log_event "start.sh: Starting NUT services"
+mkdir -p /run/openrc && touch /run/openrc/softlevel
+rc-service syslog zap 2>/dev/null
 rc-service syslog start 2>/dev/null
-rc-service syslog status
 echo -e "\n----------------------------------------\n"
 upsdrvctl -u root start
 echo -e "\n----------------------------------------\n"
@@ -167,4 +192,22 @@ upsd -u root
 echo -e "\n----------------------------------------\n"
 upsmon
 echo -e "\n----------------------------------------\n"
-tail -f /var/log/messages
+log_event "start.sh: NUT services started"
+
+# Auto-validate NUT, dbus and Proxmox connectivity on normal startup (skipped after power failure restarts)
+if [ "$POWER_FAILURE_RESTART" != "true" ]; then
+  log_event "start.sh: Running connectivity check"
+  /etc/nut/testshutdown
+fi
+
+# Confirm compose version or warn if stale
+if [ "${NUT_PLUS_COMPOSE}" == "$LATEST_COMPOSE" ]; then
+  log_event "start.sh: Docker Compose version $NUT_PLUS_COMPOSE confirmed as up to date"
+else
+  log_event "start.sh: WARNING -- Docker Compose version '${NUT_PLUS_COMPOSE:-unset}' does not match latest ($LATEST_COMPOSE) -- please update your compose file"
+fi
+
+log_event "start.sh: Currently running bnhf/nut-plus version $NUT_PLUS_VERSION"
+
+# Keep container alive and surface syslog via docker logs
+exec tail -n 0 -f /var/log/messages
