@@ -1,6 +1,6 @@
 #!/bin/bash
 # upssched-cmd
-# 2025.08.27
+# 2026.06.28
 
 sendMail() {
   local emailSubject=$(echo "$HOSTNAME UPS ${UPSNAME%@*} $1")
@@ -16,11 +16,6 @@ sendMail() {
 # NUT changes the value of $UPSNAME in upssched-cmd to $UPSNAME@localhost.
 case "$1" in
   on_battery)
-    # Send commands to UPS to set a shutdown delay and to shutdown after that delay.
-    [[ -n $NOTIFYFLAG_ONBATT ]] \
-      && upsrw -u "$NUT_USER" -p "$NUT_PASSWORD" -s "ups.delay.shutdown=$UPS_DELAY_SHUTDOWN" "$UPSNAME" 2>&1 | logger -t ups-shutdown
-    [[ -n $NOTIFYFLAG_ONBATT ]] \
-      && upscmd -u "$NUT_USER" -p "$NUT_PASSWORD" "$UPSNAME" "shutdown.return" 2>&1 | logger -t ups-shutdown
     sendMail "Power Failure!"
     ;;
   power_restored)
@@ -30,8 +25,48 @@ case "$1" in
     sendMail "Power has returned"
     ;;
   shutdown_now)
-    # Tell upsmon to declare FSD; slaves see FSD and begin shutdown.
+    # Shut down Proxmox nodes via PVE API before declaring FSD.
+    if [ -n "$PVE_SHUTDOWN_HOSTS" ]; then
+      HOSTS=( $PVE_SHUTDOWN_HOSTS )
+      NODES=( $PVE_SHUTDOWN_NODES )
+      TOKENS=( $PVE_SHUTDOWN_TOKENS )
+
+      logger -t upssched-cmd "Starting Proxmox shutdown sequence for ${#NODES[@]} node(s)"
+
+      for ((i=0;i<${#NODES[@]};i++)); do
+        if [ -n "${NODES[$i]}" ] && [[ ${#NODES[@]} -eq ${#HOSTS[@]} ]] && [[ ${#NODES[@]} -eq ${#TOKENS[@]} ]]; then
+          logger -t upssched-cmd "Attempting shutdown of node ${NODES[$i]} via ${HOSTS[$i]}"
+          response=$(curl --fail --silent --show-error --max-time 10 \
+            "https://${HOSTS[$i]}:8006/api2/json/nodes/${NODES[$i]}/status" \
+            -H "Authorization: PVEAPIToken=${TOKENS[$i]}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data "command=shutdown" --insecure 2>&1)
+          curl_exit=$?
+          [ $curl_exit -eq 0 ] \
+            && logger -t upssched-cmd "Shutdown accepted for ${NODES[$i]}: $response" \
+            || logger -t upssched-cmd "ERROR - Shutdown failed for ${NODES[$i]} (exit $curl_exit): $response"
+        elif [ -n "${NODES[$i]}" ] && [[ ${#HOSTS[@]} -eq 1 ]] && [[ ${#TOKENS[@]} -eq 1 ]]; then
+          logger -t upssched-cmd "Attempting shutdown of node ${NODES[$i]} via ${HOSTS[0]}"
+          response=$(curl --fail --silent --show-error --max-time 10 \
+            "https://${HOSTS[0]}:8006/api2/json/nodes/${NODES[$i]}/status" \
+            -H "Authorization: PVEAPIToken=${TOKENS[0]}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data "command=shutdown" --insecure 2>&1)
+          curl_exit=$?
+          [ $curl_exit -eq 0 ] \
+            && logger -t upssched-cmd "Shutdown accepted for ${NODES[$i]}: $response" \
+            || logger -t upssched-cmd "ERROR - Shutdown failed for ${NODES[$i]} (exit $curl_exit): $response"
+        else
+          logger -t upssched-cmd "ERROR - Array mismatch, no Proxmox shutdown performed for index $i"
+        fi
+      done
+    fi
     sendMail "initiated Shutdown Sequence"
+    # Set UPS shutdown delay and arm shutdown.return now, giving UPS_DELAY_SHUTDOWN seconds
+    # from this point for both Proxmox and this host to finish shutting down.
+    logger -t upssched-cmd "Setting UPS shutdown delay and arming shutdown.return (UPS_DELAY_SHUTDOWN=${UPS_DELAY_SHUTDOWN}s)"
+    upsrw -u "$NUT_USER" -p "$NUT_PASSWORD" -s "ups.delay.shutdown=$UPS_DELAY_SHUTDOWN" "$UPSNAME" 2>&1 | logger -t ups-shutdown
+    upscmd -u "$NUT_USER" -p "$NUT_PASSWORD" "$UPSNAME" "shutdown.return" 2>&1 | logger -t ups-shutdown
     upsmon -c fsd
     ;;
 esac
