@@ -7,7 +7,7 @@
 # Results are printed to stdout.
 
 log_event() {
-  echo "$(date -u '+%b %e %H:%M:%S') $HOSTNAME $1"
+  logger -t testemail "$1"
 }
 
 errors=0

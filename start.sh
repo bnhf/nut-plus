@@ -1,13 +1,19 @@
 #!/bin/bash
 # start.sh
-# 2026.06.28
+# 2026.07.02
 
 #set -x
 
-LATEST_COMPOSE=2026.06.28
+LATEST_COMPOSE=2026.07.02
+
+# Note how many lines already exist (from prior container runs) so we only stream this boot's output later
+startLine=$(wc -l < "$NUT_LOGFILE" 2>/dev/null); startLine=${startLine:-0}
+
+# Start syslogd first so every log_event/logger call below has somewhere to land
+syslogd ${SYSLOGD_OPTS}
 
 log_event() {
-  echo "$(date -u '+%b %e %H:%M:%S') $HOSTNAME $1"
+  logger -t start.sh "$1"
 }
 
 [[ "$NUT_DRIVER" == "scanner" ]] && nutDriver="" || nutDriver="$NUT_DRIVER"
@@ -182,9 +188,6 @@ fi
 
 # Start NUT services
 log_event "start.sh: Starting NUT services"
-mkdir -p /run/openrc && touch /run/openrc/softlevel
-rc-service syslog zap 2>/dev/null
-rc-service syslog start 2>/dev/null
 echo -e "\n----------------------------------------\n"
 upsdrvctl -u root start
 echo -e "\n----------------------------------------\n"
@@ -209,5 +212,5 @@ fi
 
 log_event "start.sh: Currently running bnhf/nut-plus version $NUT_PLUS_VERSION"
 
-# Keep container alive and surface syslog via docker logs
-exec tail -n 0 -f /var/log/messages
+# Keep container alive and surface this boot's syslog output via docker logs
+exec tail -n +$((startLine + 1)) -f "$NUT_LOGFILE"

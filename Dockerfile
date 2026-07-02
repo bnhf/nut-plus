@@ -5,10 +5,12 @@ LABEL maintainer="Scott Ueland (https://github.com/bnhf)"
 ARG BUILD_DATE
 LABEL version="${BUILD_DATE}"
 
+ENV NUT_LOGFILE=/etc/nut/messages
 ENV NUT_QUIET_INIT_UPSNOTIFY=true \
     TLS_FILE=/etc/ssl/cert.pem \
-    MSMTP_LOG=-
-ENV NUT_PLUS_VERSION=${BUILD_DATE:-unknown}
+    MSMTP_LOG=- \
+    SYSLOGD_OPTS="-O ${NUT_LOGFILE} -t -s 1024 -b 5" \
+    NUT_PLUS_VERSION=${BUILD_DATE:-unknown}
 
 # Install required packages
 RUN apk add --no-cache \
@@ -20,9 +22,7 @@ RUN apk add --no-cache \
   neon neon-dev \
   gawk sed \
   tzdata dbus \
-  syslog-ng busybox-openrc \
   msmtp ca-certificates curl jq \
-  && rc-update add syslog boot \
   && mkdir -p /opt/nut /var/run/nut/upssched \
   && chmod 700 /var/run/nut
 
