@@ -13,7 +13,7 @@ sendMail() {
   } | msmtp -t 2>&1 | logger -t upssched-cmd
 }
 
-# NUT changes the value of $UPSNAME in upssched-cmd to $UPSNAME@localhost.
+# NUT changes the value of $UPSNAME in upssched-cmd to $UPSNAME@NUT_HOST (the monitored host, per MONITOR in upsmon.conf).
 case "$1" in
   on_battery)
     sendMail "Power Failure!"
@@ -61,12 +61,56 @@ case "$1" in
         fi
       done
     fi
+
+    # Shut down UniFi UNAS-Pro devices via their session-based API.
+    # Each entry is "username:password@host" -- split on the last @ for host (hosts never
+    # contain @), then the first : for user/password (so passwords may safely contain @ or :).
+    if [ -n "$UNAS_SHUTDOWN_HOSTS" ]; then
+      UNAS_ENTRIES=( $UNAS_SHUTDOWN_HOSTS )
+
+      logger -t upssched-cmd "Starting UNAS-Pro shutdown sequence for ${#UNAS_ENTRIES[@]} host(s)"
+
+      for entry in "${UNAS_ENTRIES[@]}"; do
+        unas_host="${entry##*@}"
+        unas_userpass="${entry%@*}"
+        unas_user="${unas_userpass%%:*}"
+        unas_pass="${unas_userpass#*:}"
+
+        logger -t upssched-cmd "Attempting shutdown of UNAS-Pro $unas_host"
+
+        cookiejar=$(mktemp)
+        h1=$(mktemp)
+        h2=$(mktemp)
+
+        curl -sk --max-time 10 -c "$cookiejar" -D "$h1" -o /dev/null "https://$unas_host/"
+        csrf1=$(grep -i '^x-csrf-token:' "$h1" | tr -d '\r' | awk '{print $2}')
+
+        curl -sk --max-time 10 -c "$cookiejar" -b "$cookiejar" -H "Content-Type: application/json" \
+          -H "X-CSRF-Token: $csrf1" -D "$h2" -o /dev/null "https://$unas_host/api/auth/login" \
+          -d "{\"username\":\"$unas_user\",\"password\":\"$unas_pass\",\"remember\":true,\"rememberMe\":true}"
+        csrf2=$(grep -i '^x-csrf-token:' "$h2" | tr -d '\r' | awk '{print $2}')
+
+        response=$(curl -sk --max-time 10 -b "$cookiejar" -H "X-CSRF-Token: $csrf2" \
+          -X POST "https://$unas_host/api/system/poweroff" 2>&1)
+        curl_exit=$?
+        [ $curl_exit -eq 0 ] \
+          && logger -t upssched-cmd "Shutdown accepted for UNAS-Pro $unas_host: $response" \
+          || logger -t upssched-cmd "ERROR - Shutdown failed for UNAS-Pro $unas_host (exit $curl_exit): $response"
+
+        rm -f "$cookiejar" "$h1" "$h2"
+      done
+    fi
+
     sendMail "initiated Shutdown Sequence"
-    # Set UPS shutdown delay and arm shutdown.return now, giving UPS_DELAY_SHUTDOWN seconds
-    # from this point for both Proxmox and this host to finish shutting down.
-    logger -t upssched-cmd "Setting UPS shutdown delay and arming shutdown.return (UPS_DELAY_SHUTDOWN=${UPS_DELAY_SHUTDOWN}s)"
-    upsrw -u "$NUT_USER" -p "$NUT_PASSWORD" -s "ups.delay.shutdown=$UPS_DELAY_SHUTDOWN" "$UPSNAME" 2>&1 | logger -t ups-shutdown
-    upscmd -u "$NUT_USER" -p "$NUT_PASSWORD" "$UPSNAME" "shutdown.return" 2>&1 | logger -t ups-shutdown
+    # Only the primary owns the physical UPS -- a secondary must never arm shutdown.return,
+    # since it would race the primary's own shutdown sequence against the same hardware.
+    if [ "$MASTER_SLAVE" == "master" ]; then
+      # Set UPS shutdown delay and arm shutdown.return now, giving UPS_DELAY_SHUTDOWN seconds
+      # from this point for both Proxmox and this host to finish shutting down.
+      logger -t upssched-cmd "Setting UPS shutdown delay and arming shutdown.return (UPS_DELAY_SHUTDOWN=${UPS_DELAY_SHUTDOWN}s)"
+      upsrw -u "$NUT_USER" -p "$NUT_PASSWORD" -s "ups.delay.shutdown=$UPS_DELAY_SHUTDOWN" "$UPSNAME" 2>&1 | logger -t ups-shutdown
+      upscmd -u "$NUT_USER" -p "$NUT_PASSWORD" "$UPSNAME" "shutdown.return" 2>&1 | logger -t ups-shutdown
+    fi
     upsmon -c fsd
     ;;
 esac

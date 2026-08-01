@@ -16,6 +16,9 @@ Shutdown can be triggered by a configurable time delay (`SYSTEM_DELAY_SHUTDOWN`)
 **Proxmox Integration:**
 Supports graceful Proxmox node shutdown via API tokens with the `Sys.PowerMgmt` privilege, enabling coordinated cluster shutdowns before the Docker host powers off. Supports one-to-one host/node/token arrays, or a single host and token with multiple nodes.
 
+**UniFi UNAS-Pro Integration:**
+Supports graceful shutdown of one or more UNAS-Pro devices via their session-based API before the Docker host powers off. Rather than using an existing administrator account, create a dedicated user on each UNAS-Pro for this purpose, with a unique password used nowhere else. As of this writing, UNAS-Pro's role options don't offer granular permissions below admin-level access -- a dedicated account still limits blast radius (a compromised credential doesn't expose your main admin login) even though it can't be scoped down to poweroff-only.
+
 **Recovery Capabilities:**
 Upon power restoration, the container can send Magic Packets to wake previously shutdown systems via [WoLweb](https://hub.docker.com/r/bnhf/wolweb), extending UPS battery life by avoiding complete discharge before systems come back online.
 
@@ -29,10 +32,12 @@ Upon power restoration, the container can send Magic Packets to wake previously 
 
 The YAML below is intended to be self-documenting and typically requires no editing. Use the `Environment variables` section of Portainer for all installation-specific values:
 
+> **Upgrading an existing stack:** if your current environment variables have `NUT_USB=auto`, change it to `NUT_USB=` (blank) before redeploying -- the `devices:` section now reuses this variable directly, and `auto` is no longer a valid value there.
+
 ```yaml
 services:
   nut-plus: # This docker-compose typically requires no editing. Use the Environment variables section of Portainer to set your values.
-    # 2026.07.02
+    # 2026.08.01
     # GitHub home for this project: https://github.com/bnhf/nut-plus.
     # Docker container home for this project with setup instructions: https://hub.docker.com/r/bnhf/nut-plus.
     image: bnhf/nut-plus:${TAG:-latest} # Add the tag like latest or test to the environment variables below.
@@ -40,20 +45,22 @@ services:
     hostname: ${HOSTNAME} # Set a unique hostname per instance -- used in email notifications.
     dns_search: ${DOMAIN:-localdomain} # LAN domain for hostname resolution (e.g. local, localdomain). Optionally append a Tailnet domain space-separated.
     devices:
-      #- ${NUT_USB:-auto} # Specify a USB device path override (e.g. /dev/usb/hiddev0). Defaults to auto-detection.
-      - ${NUT_SCAN:-/dev/bus/usb} # Parent directory for USB device nodes. Used by nut-scanner to identify connected USB devices.
+      - ${NUT_USB:-/dev/null} # Specific USB device path override (e.g. /dev/usb/hiddev0). Leave blank unless bypassing bus auto-detection -- defaults to /dev/null, which always exists.
+      - ${NUT_SCAN:-/dev/null} # Parent directory for USB device nodes, used by nut-scanner for auto-detection. Leave blank for secondaries or hosts with no USB controller -- defaults to /dev/null. Primaries: set NUT_SCAN=/dev/bus/usb.
     ports:
       - ${HOST_PORT:-3493}:3493 # Use the standard NUT port of 3493, or optionally change it if it's in use on your Docker host. Default=3493.
     environment:
-      - NUT_PLUS_COMPOSE=2026.07.02 # Do not change this value.
+      - NUT_PLUS_COMPOSE=2026.08.01 # Do not change this value.
       # ── Identity ────────────────────────────────────────────────────────────
       - UPSNAME=${UPSNAME} # Sets a name for the UPS (1 to 8 chars), used in email notifications.
       - TZ=${TZ} # Timezone, e.g. America/Denver.
       # ── UPS connectivity ────────────────────────────────────────────────────
-      # On secondaries set NUT_MODE=netclient and MASTER_SLAVE=slave. No need to modify the devices section.
+      # On secondaries set NUT_MODE=netclient, MASTER_SLAVE=slave, and NUT_HOST to the primary's hostname or IP. No need to modify the devices section.
       - NUT_MODE=${NUT_MODE:-standalone} # standalone, netserver, or netclient. See https://networkupstools.org/docs/man/nut.conf.html.
+      - NUT_HOST=${NUT_HOST:-localhost} # Hostname or IP of the NUT server to monitor. Leave as localhost for standalone/netserver (primary); set to the primary's address for netclient (secondary).
       - NUT_DRIVER=${NUT_DRIVER:-scanner} # Specify a NUT driver to use, or use scanner to let nut-scanner identify the connected UPS.
       - NUT_USB=${NUT_USB:-auto} # Leave as auto, or specify a USB device path override.
+      - NUT_SERIAL=${NUT_SERIAL} # If multiple UPS units are attached to this host (one container per unit), set this to the serial number of the unit this container should claim. Leave blank when only one UPS is on this host.
       - MASTER_SLAVE=${MASTER_SLAVE} # master if directly connected to the UPS, slave if not.
       - NUT_USER=${NUT_USER:-admin} # Username for this NUT instance (full access).
       - NUT_PASSWORD=${NUT_PASSWORD} # Password for the full access user (required).
@@ -90,8 +97,10 @@ services:
       - PVE_SHUTDOWN_HOSTS=${PVE_SHUTDOWN_HOSTS} # Ordered list of pve hostnames (or IPs) to be used for API shutdown. Used with matching lists of PVE_SHUTDOWN_NODES and PVE_SHUTDOWN_TOKENS.
       - PVE_SHUTDOWN_NODES=${PVE_SHUTDOWN_NODES} # Ordered list of pve nodes. Used with matching lists of PVE_SHUTDOWN_HOSTS and PVE_SHUTDOWN_TOKENS.
       - PVE_SHUTDOWN_TOKENS=${PVE_SHUTDOWN_TOKENS} # Ordered list of pve API tokens with secrets in the form <username>@<realm>!<tokenid>=<secret>.
+      # ── UniFi UNAS-Pro shutdown via API ──────────────────────────────────────
+      - UNAS_SHUTDOWN_HOSTS=${UNAS_SHUTDOWN_HOSTS} # Space-separated list of UNAS-Pro devices to shut down, each in the form username:password@host (password may contain @ or : characters).
     healthcheck:
-      test: ["CMD-SHELL", "upsc ${UPSNAME}@localhost 2>&1 | grep -q 'ups.status'"] # Command to check health.
+      test: ["CMD-SHELL", "upsc ${UPSNAME}@${NUT_HOST:-localhost} 2>&1 | grep -q 'ups.status'"] # Command to check health.
       interval: ${HC_INTERVAL:-30s} # Interval between health checks. Default=30s.
       timeout: ${HC_TIMEOUT:-5s} # Timeout for each health check. Default=5s.
       retries: ${HC_RETRIES:-3} # How many times to retry. Default=3.
@@ -118,8 +127,10 @@ HC_START_PERIOD=15s
 UPSNAME=Homelab
 TZ=America/Denver
 NUT_MODE=netserver
+NUT_HOST=localhost
 NUT_DRIVER=scanner
-NUT_USB=auto
+NUT_USB=
+NUT_SERIAL=
 MASTER_SLAVE=master
 NUT_USER=admin
 NUT_PASSWORD=secret
@@ -150,5 +161,6 @@ WOLWEB_DELAY=0
 PVE_SHUTDOWN_HOSTS=
 PVE_SHUTDOWN_NODES=
 PVE_SHUTDOWN_TOKENS=
+UNAS_SHUTDOWN_HOSTS=
 HOST_DIR=/data
 ```

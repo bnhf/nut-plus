@@ -1,10 +1,10 @@
 #!/bin/bash
 # start.sh
-# 2026.07.02
+# 2026.08.01
 
 #set -x
 
-LATEST_COMPOSE=2026.07.02
+LATEST_COMPOSE=2026.08.01
 
 # Note how many lines already exist (from prior container runs) so we only stream this boot's output later
 startLine=$(wc -l < "$NUT_LOGFILE" 2>/dev/null); startLine=${startLine:-0}
@@ -17,6 +17,10 @@ log_event() {
 }
 
 [[ "$NUT_DRIVER" == "scanner" ]] && nutDriver="" || nutDriver="$NUT_DRIVER"
+
+# Script-level default so an older compose file (predating NUT_HOST) that doesn't pass this
+# var through still gets a working MONITOR line instead of a malformed "user@" identifier.
+NUT_HOST="${NUT_HOST:-localhost}"
 
 log_event "start.sh: Container starting"
 
@@ -42,29 +46,60 @@ modifyConfFiles() {
   # Configure nut.conf for standalone, netserver or netclient
   sed -i "s|^MODE=.*|MODE=$NUT_MODE|" /etc/nut/nut.conf
 
-  # Configure ups.conf based on results from nut-scanner -U
-  { nutScanner="$(nut-scanner -U)"; printf '%s\n' "$nutScanner"; }
+  if [ "$NUT_MODE" != "netclient" ]; then
+    # Configure ups.conf based on results from nut-scanner -U
+    { nutScanner="$(nut-scanner -U)"; printf '%s\n' "$nutScanner"; }
 
-  echo "$nutScanner" | awk -v devname="$UPSNAME" '
-  BEGIN { print "" }
-  /^\[/{print "[" devname "]"}
-  /^\s+driver/     {gsub(/"/, "", $3); print "  driver = " $3}
-  /^\s+port/       {gsub(/"/, "", $3); print "  port = " $3}
-  /^\s+vendorid/   {gsub(/"/, "", $3); print "  vendorid = " $3}
-  /^\s+productid/  {gsub(/"/, "", $3); print "  productid = " $3}
-  /^\s+product/    {match($0, /"(.+)"/, m); if (m[1] != "") print "  desc = \"" m[1] "\"" }
-  /^\s+serial/     {gsub(/"/, "", $3); print "  serial = " $3}
-  /^\s+vendor/     {match($0, /"(.+)"/, m); if (m[1] != "") print "  vendor = \"" m[1] "\"" }
-  /^\s+bus/        {gsub(/"/, "", $3); print "  bus = " $3}
-  ' >> /etc/nut/ups.conf
+    deviceCount=$(echo "$nutScanner" | grep -c '^\[')
+    if [ "$deviceCount" -gt 1 ] && [ -z "$NUT_SERIAL" ]; then
+      log_event "start.sh: WARNING -- nut-scanner found $deviceCount USB UPS devices but NUT_SERIAL is unset; using the first one found. Set NUT_SERIAL to pin a specific device when multiple UPS units share this host."
+    fi
 
-  {  printf 's|^  port =.*|  port = %s|\n' "$NUT_USB"
-    [[ -n $nutDriver ]] && printf 's|^  driver =.*|  driver = %s|\n' "$nutDriver"
-    [[ -n $BATTERY_RUNTIME_LOW ]] && printf '/^  driver =/a\\\n  override.battery.runtime.low = %s\n' "$BATTERY_RUNTIME_LOW"
-    [[ -n $BATTERY_CHARGE_LOW ]] && printf '/^  driver =/a\\\n  override.battery.charge.low = %s\n' "$BATTERY_CHARGE_LOW"
-  } | sed -i -f - /etc/nut/ups.conf
+    # Groups nut-scanner's output per device (blank-line separated) and keeps only the
+    # block matching NUT_SERIAL, or the first block found if NUT_SERIAL is unset -- this
+    # avoids merging multiple detected devices into colliding [devname] sections.
+    echo "$nutScanner" | awk -v devname="$UPSNAME" -v wantserial="$NUT_SERIAL" '
+    BEGIN { RS=""; FS="\n" }
+    function fieldval(line,    f,n) {
+      n = split(line, f, " ")
+      gsub(/"/, "", f[3])
+      return f[3]
+    }
+    {
+      serial = ""
+      hasdevice = 0
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^\[/) hasdevice = 1
+        if ($i ~ /^\s+serial/) serial = fieldval($i)
+      }
+      if (hasdevice == 0) next
+      if (wantserial != "" && serial != wantserial) next
+      if (wantserial == "" && found == 1) next
+      found = 1
+      print ""
+      for (i=1; i<=NF; i++) {
+        line = $i
+        if (line ~ /^\[/)                 { print "[" devname "]" }
+        else if (line ~ /^\s+driver/)     { print "  driver = " fieldval(line) }
+        else if (line ~ /^\s+port/)       { print "  port = " fieldval(line) }
+        else if (line ~ /^\s+vendorid/)   { print "  vendorid = " fieldval(line) }
+        else if (line ~ /^\s+productid/)  { print "  productid = " fieldval(line) }
+        else if (line ~ /^\s+product/)    { match(line, /"(.+)"/, m); if (m[1] != "") print "  desc = \"" m[1] "\"" }
+        else if (line ~ /^\s+serial/)     { print "  serial = " fieldval(line) }
+        else if (line ~ /^\s+vendor/)     { match(line, /"(.+)"/, m); if (m[1] != "") print "  vendor = \"" m[1] "\"" }
+        else if (line ~ /^\s+bus/)        { print "  bus = " fieldval(line) }
+      }
+    }
+    ' >> /etc/nut/ups.conf
 
-  echo -e "\n----------------------------------------\n"
+    {  printf 's|^  port =.*|  port = %s|\n' "$NUT_USB"
+      [[ -n $nutDriver ]] && printf 's|^  driver =.*|  driver = %s|\n' "$nutDriver"
+      [[ -n $BATTERY_RUNTIME_LOW ]] && printf '/^  driver =/a\\\n  override.battery.runtime.low = %s\n' "$BATTERY_RUNTIME_LOW"
+      [[ -n $BATTERY_CHARGE_LOW ]] && printf '/^  driver =/a\\\n  override.battery.charge.low = %s\n' "$BATTERY_CHARGE_LOW"
+    } | sed -i -f - /etc/nut/ups.conf
+  else
+    log_event "start.sh: NUT_MODE=netclient -- skipping nut-scanner and ups.conf driver setup (no local UPS to define)"
+  fi
 
   # Configure upsd.conf to listen on all interfaces
   { printf '/^# for notifications from upsd about staleness/a\\\nMAXAGE %s\n' "$MAXAGE"
@@ -88,7 +123,7 @@ modifyConfFiles() {
 
   # Configure upsmon.conf to monitor the UPS
   { printf 's|^# RUN_AS_USER nut|RUN_AS_USER root|\n'
-    printf '/^# MONITOR myups@localhost.*/a\\\nMONITOR %s@localhost 1 %s %s %s\n' "$UPSNAME" "$NUT_USER" "$NUT_PASSWORD" "$MASTER_SLAVE"
+    printf '/^# MONITOR myups@localhost.*/a\\\nMONITOR %s@%s 1 %s %s %s\n' "$UPSNAME" "$NUT_HOST" "$NUT_USER" "$NUT_PASSWORD" "$MASTER_SLAVE"
     printf '/^# NOTIFYCMD \/bin\/notifyme/a\\\nNOTIFYCMD %s\n' "$NOTIFYCMD"
     [ -n "$SHUTDOWNCMD" ] && printf 's|^SHUTDOWNCMD.*|SHUTDOWNCMD "%s"|\n' "$SHUTDOWNCMD"
     printf 's|^POWERDOWNFLAG.*|POWERDOWNFLAG /etc/nut/killpower|\n'
@@ -188,11 +223,15 @@ fi
 
 # Start NUT services
 log_event "start.sh: Starting NUT services"
-echo -e "\n----------------------------------------\n"
-upsdrvctl -u root start
-echo -e "\n----------------------------------------\n"
-upsd -u root
-echo -e "\n----------------------------------------\n"
+if [ "$NUT_MODE" != "netclient" ]; then
+  echo -e "\n----------------------------------------\n"
+  upsdrvctl -u root start
+  echo -e "\n----------------------------------------\n"
+  upsd -u root
+  echo -e "\n----------------------------------------\n"
+else
+  log_event "start.sh: NUT_MODE=netclient -- skipping local driver and upsd (no local UPS to serve)"
+fi
 upsmon
 echo -e "\n----------------------------------------\n"
 log_event "start.sh: NUT services started"
