@@ -1,4 +1,4 @@
-# nut-plus - Network UPS Tools (NUT) with Email notifications, Proxmox API shutdown, and WoL support -- oriented towards use with Portainer
+# nut-plus - Network UPS Tools (NUT) with Email notifications, Proxmox API shutdown, UNAS-Pro API shutdown and WoL support -- oriented towards use with Portainer
 
 This Docker implementation of Network UPS Tools is oriented towards use with Portainer via a Docker Compose YAML. Installation can typically be done using only env vars, with no editing of the compose itself.
 
