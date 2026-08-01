@@ -20,7 +20,7 @@ log_event "testshutdown: Starting dry-run connectivity checks"
 
 # Test NUT daemon connectivity via upsc
 log_event "testshutdown: Testing NUT daemon connectivity (UPSNAME=$UPSNAME)"
-upsc_result=$(upsc ${UPSNAME}@localhost 2>&1)
+upsc_result=$(upsc ${UPSNAME}@${NUT_HOST} 2>&1)
 upsc_exit=$?
 if [ $upsc_exit -eq 0 ]; then
   ups_status=$(echo "$upsc_result" | grep 'ups.status' | awk '{print $NF}')
@@ -60,6 +60,41 @@ else
       log_event "testshutdown: OK - $node reachable at $host, PVE version $pve_version, token valid"
     else
       log_event "testshutdown: ERROR - $node unreachable at $host (exit $curl_exit): $response -- check token has Sys.PowerMgmt privilege (PVE_SHUTDOWN_NODES=$node, PVE_SHUTDOWN_HOSTS=$host)"
+      errors=$((errors + 1))
+    fi
+  done
+fi
+
+# Test UNAS-Pro API for each host using login only -- never calls the poweroff endpoint
+if [ -z "$UNAS_SHUTDOWN_HOSTS" ]; then
+  log_event "testshutdown: No UNAS-Pro hosts configured (UNAS_SHUTDOWN_HOSTS not set), skipping API checks"
+else
+  UNAS_ENTRIES=( $UNAS_SHUTDOWN_HOSTS )
+  for entry in "${UNAS_ENTRIES[@]}"; do
+    unas_host="${entry##*@}"
+    unas_userpass="${entry%@*}"
+    unas_user="${unas_userpass%%:*}"
+    unas_pass="${unas_userpass#*:}"
+
+    log_event "testshutdown: Testing UNAS-Pro API for $unas_host"
+
+    cookiejar=$(mktemp)
+    h1=$(mktemp)
+
+    curl -sk --max-time 10 -c "$cookiejar" -D "$h1" -o /dev/null "https://$unas_host/"
+    csrf1=$(grep -i '^x-csrf-token:' "$h1" | tr -d '\r' | awk '{print $2}')
+
+    login_code=$(curl -sk --max-time 10 -c "$cookiejar" -b "$cookiejar" -H "Content-Type: application/json" \
+      -H "X-CSRF-Token: $csrf1" -o /dev/null -w '%{http_code}' "https://$unas_host/api/auth/login" \
+      -d "{\"username\":\"$unas_user\",\"password\":\"$unas_pass\",\"remember\":true,\"rememberMe\":true}")
+    curl_exit=$?
+
+    rm -f "$cookiejar" "$h1"
+
+    if [ $curl_exit -eq 0 ] && [ "$login_code" = "200" ]; then
+      log_event "testshutdown: OK - $unas_host reachable, credentials valid"
+    else
+      log_event "testshutdown: ERROR - $unas_host login check failed (exit $curl_exit, HTTP $login_code) -- check UNAS_SHUTDOWN_HOSTS credentials"
       errors=$((errors + 1))
     fi
   done
