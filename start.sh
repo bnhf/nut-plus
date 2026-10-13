@@ -25,7 +25,7 @@ NUT_HOST="${NUT_HOST:-localhost}"
 log_event "start.sh: Container starting"
 
 # Check if /etc/nut files exist, and copy them from /opt/nut if they don't
-files=( nut.conf ups.conf upsd.conf upsd.users upsmon.conf upssched.conf upssched-cmd testemail testshutdown )
+files=( nut.conf ups.conf upsd.conf upsd.users upsmon.conf upssched.conf upssched-cmd testemail testshutdown power-restore-delay.service power-restore-wait.service )
 
 for file in "${files[@]}"; do
   if [ ! -f /etc/nut/$file ] || [[ $UPDATE_CONFIGS == "true" ]]; then
@@ -194,11 +194,65 @@ sendMail() {
   } | msmtp -t 2>&1 | logger -t upssched-cmd
 }
 
+# Read one property of a host systemd unit over dbus (empty if the bus isn't reachable)
+unitProperty() {
+  local unitPath=$(printf '%s' "$1" | sed 's/-/_2d/g; s/\./_2e/g')
+  dbus-send --system --print-reply=literal --dest=org.freedesktop.systemd1 \
+    "/org/freedesktop/systemd1/unit/$unitPath" \
+    org.freedesktop.DBus.Properties.Get "string:org.freedesktop.systemd1.$2" "string:$3" 2>/dev/null \
+    | awk '{ print $NF }'
+}
+
+# Log what the host's power-restore-delay and power-restore-wait units did during this boot
+logRestoreUnits() {
+  local unit name loadState started finished status secs
+  for unit in power-restore-delay.service power-restore-wait.service; do
+    name=${unit%.service}
+    loadState=$(unitProperty "$unit" Unit LoadState)
+    if [ -z "$loadState" ]; then
+      log_event "start.sh: Unable to query host systemd via dbus -- power-restore unit status unavailable"
+      return
+    fi
+    if [ "$loadState" != "loaded" ]; then
+      log_event "start.sh: $name: not installed on this host -- see README (Power Restore Delay and Wait)"
+      continue
+    fi
+    if [ "$(unitProperty "$unit" Unit UnitFileState)" != "enabled" ]; then
+      log_event "start.sh: $name: installed but not enabled -- run: sudo systemctl enable $unit"
+      continue
+    fi
+    if [ "$(unitProperty "$unit" Unit ConditionTimestampMonotonic)" == "0" ]; then
+      log_event "start.sh: $name: didn't run this boot (enabled after boot?)"
+      continue
+    fi
+    if [ "$(unitProperty "$unit" Unit ConditionResult)" != "true" ]; then
+      log_event "start.sh: $name: skipped this boot -- check its ConditionPathExists matches the host path of killpower"
+      continue
+    fi
+    started=$(unitProperty "$unit" Service ExecMainStartTimestampMonotonic)
+    finished=$(unitProperty "$unit" Service ExecMainExitTimestampMonotonic)
+    status=$(unitProperty "$unit" Service ExecMainStatus)
+    if [[ ! $started =~ ^[0-9]+$ ]] || [[ ! $finished =~ ^[0-9]+$ ]] || (( finished < started )); then
+      log_event "start.sh: $name: ran this boot, duration unavailable"
+      continue
+    fi
+    secs=$(( (finished - started) / 1000000 ))
+    if [ "$name" == "power-restore-delay" ]; then
+      log_event "start.sh: $name: held boot for ${secs}s"
+    elif [ "$status" == "124" ]; then
+      log_event "start.sh: $name: timed out after ${secs}s -- DNS or clock still not ready"
+    else
+      log_event "start.sh: $name: held Docker for ${secs}s -- DNS and clock ready"
+    fi
+  done
+}
+
 # Capture power failure state before removing the killpower flag
 POWER_FAILURE_RESTART=false
 if [ -f /etc/nut/killpower ]; then
   POWER_FAILURE_RESTART=true
   log_event "start.sh: Power failure restart detected -- killpower flag found"
+  logRestoreUnits
   rm -f /etc/nut/killpower
   log_event "start.sh: killpower flag removed"
 fi

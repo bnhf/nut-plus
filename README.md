@@ -164,3 +164,80 @@ PVE_SHUTDOWN_TOKENS=
 UNAS_SHUTDOWN_HOSTS=
 HOST_DIR=/data
 ```
+
+## Power Restore Delay and Wait (optional host services)
+
+After a power failure, the whole LAN restarts at once. A Raspberry Pi often finishes booting before the network (gateway, DNS, Internet) is answering. When that happens, Docker can start its containers before the host has any DNS servers, and they stay without DNS until they're restarted. The result is failed power-restored emails and WoL wakes, and it affects every container on the host.
+
+nut-plus includes two small systemd units for the Docker host that fix this. Both only run when nut-plus's `killpower` flag is present (i.e. after a UPS power-failure shutdown) -- on a normal boot they do nothing.
+
+| Unit | What it does | Maximum wait |
+|---|---|---|
+| `power-restore-delay.service` | Pauses the boot early, before networking, Docker and most other services start, giving the LAN a head start | 60 seconds (fixed) |
+| `power-restore-wait.service` | Holds Docker until DNS resolves `pool.ntp.org` and the host clock has synced, then lets it start | 120 seconds |
+
+NUT isn't monitoring the UPS while these units wait, so the total delay is capped at about 3 minutes.
+
+nut-plus copies both units to your persistent directory (e.g. `/data/nut/`) on every start.
+
+### Compatibility
+
+The units require systemd 239 or later, Docker running as `docker.service`, and an NTP client that reports sync status to the kernel (systemd-timesyncd, chrony or ntpd).
+
+| Distribution | Supported releases |
+|---|---|
+| Raspberry Pi OS | Buster (10), Bullseye (11), Bookworm (12), Trixie (13) |
+| Debian | 10 (Buster) and later |
+| Ubuntu | 20.04 LTS and later |
+
+Not supported: Ubuntu 18.04 (systemd 237), Docker installed as a snap (its service is `snap.docker.dockerd`, not `docker.service`), and hosts without systemd (e.g. Alpine, Unraid).
+
+### Install
+
+```bash
+sudo cp /data/nut/power-restore-delay.service /data/nut/power-restore-wait.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable power-restore-delay.service power-restore-wait.service
+```
+
+If your `HOST_DIR` isn't `/data`, edit the `ConditionPathExists` line (and `RequiresMountsFor` in `power-restore-delay.service`) in the copies under `/etc/systemd/system/` before running `daemon-reload`. Edit the installed copies, not the ones in your persistent directory -- nut-plus overwrites those on start when `UPDATE_CONFIGS=true`.
+
+To check the installation without rebooting:
+
+```bash
+systemctl is-enabled power-restore-delay.service power-restore-wait.service
+sudo systemd-analyze verify /etc/systemd/system/power-restore-delay.service /etc/systemd/system/power-restore-wait.service
+```
+
+Don't test by creating a `killpower` file by hand -- upsmon checks the file for its own marker, and a fake one makes it disable the power down flag until the container restarts.
+
+After a power failure, nut-plus reads each unit's result from the host's systemd (via the dbus socket it already mounts) and adds it to its own log, for example:
+
+```
+start.sh: power-restore-delay: held boot for 60s
+start.sh: power-restore-wait: held Docker for 47s -- DNS and clock ready
+```
+
+It also logs when a unit isn't installed, isn't enabled, was skipped (usually a `ConditionPathExists` path that doesn't match your `HOST_DIR`), or timed out. On the host itself, this shows the same boot's details:
+
+```bash
+journalctl -b -u power-restore-delay -u power-restore-wait -o short-precise --no-pager
+```
+
+On Raspberry Pi OS the system journal is kept in memory by default, so it's lost on reboot. To keep it across reboots (capped at 50 MB):
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d /var/log/journal
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=50M\n' | sudo tee /etc/systemd/journald.conf.d/50-persistent.conf
+sudo systemctl restart systemd-journald
+```
+
+### Remove
+
+```bash
+sudo systemctl disable power-restore-delay.service power-restore-wait.service
+sudo rm /etc/systemd/system/power-restore-delay.service /etc/systemd/system/power-restore-wait.service
+sudo systemctl daemon-reload
+```
+
+`systemctl status power-restore-delay power-restore-wait` should then report both units as not found.
