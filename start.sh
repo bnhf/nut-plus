@@ -194,18 +194,22 @@ sendMail() {
   } | msmtp -t 2>&1 | logger -t upssched-cmd
 }
 
-# Read one property of a host systemd unit over dbus (empty if the bus isn't reachable)
-unitProperty() {
+# Read one property of a host systemd unit over dbus, as dbus-send prints it (empty if the bus isn't reachable)
+unitPropertyRaw() {
   local unitPath=$(printf '%s' "$1" | sed 's/-/_2d/g; s/\./_2e/g')
   dbus-send --system --print-reply=literal --dest=org.freedesktop.systemd1 \
     "/org/freedesktop/systemd1/unit/$unitPath" \
-    org.freedesktop.DBus.Properties.Get "string:org.freedesktop.systemd1.$2" "string:$3" 2>/dev/null \
-    | awk '{ print $NF }'
+    org.freedesktop.DBus.Properties.Get "string:org.freedesktop.systemd1.$2" "string:$3" 2>/dev/null
 }
 
-# Log what the host's power-restore-delay and power-restore-wait units did during this boot
-logRestoreUnits() {
-  local unit name loadState started finished status secs
+# Read one simple (string, number or boolean) property of a host systemd unit
+unitProperty() {
+  unitPropertyRaw "$@" | awk '{ print $NF }'
+}
+
+# Log whether the host's power-restore units are installed, and the settings in the installed copies
+logRestoreUnitSettings() {
+  local unit name loadState delay timeout paths
   for unit in power-restore-delay.service power-restore-wait.service; do
     name=${unit%.service}
     loadState=$(unitProperty "$unit" Unit LoadState)
@@ -221,6 +225,37 @@ logRestoreUnits() {
       log_event "start.sh: $name: installed but not enabled -- run: sudo systemctl enable $unit"
       continue
     fi
+
+    # The delay/limit is the first number in the ExecStart command line (sleep 60, timeout 120)
+    delay=$(unitPropertyRaw "$unit" Service ExecStart | awk '
+      /array \[/ { arrays++ }
+      arrays >= 2 { for (i = 1; i <= NF; i++) { if ($i == "]") exit; if ($i ~ /^[0-9]+[smhd]?$/) { print $i; exit } } }')
+    [[ $delay =~ ^[0-9]+$ ]] && delay="${delay}s"
+    timeout=$(unitProperty "$unit" Service TimeoutStartUSec)
+    [[ $timeout =~ ^[0-9]{1,15}$ ]] && timeout="$((timeout / 1000000))s" || timeout="none"
+    paths=$(unitPropertyRaw "$unit" Unit Conditions | awk '
+      { for (i = 1; i <= NF; i++) tok[++n] = $i }
+      END { for (i = 1; i <= n; i++) if (tok[i] == "ConditionPathExists") printf "%s%s", (found++ ? " or " : ""), tok[i + 5] }')
+
+    if [ "$name" == "power-restore-delay" ]; then
+      log_event "start.sh: $name: enabled -- boot delay ${delay:-unknown} (start timeout $timeout), runs if ${paths:-(no path condition)} exists"
+    else
+      log_event "start.sh: $name: enabled -- Docker wait up to ${delay:-unknown} (start timeout $timeout), runs if ${paths:-(no path condition)} exists"
+    fi
+    if [ "$(unitProperty "$unit" Service RemainAfterExit)" != "true" ]; then
+      log_event "start.sh: $name: RemainAfterExit not set -- results can't be logged; copy the current unit from /etc/nut"
+    fi
+  done
+}
+
+# Log what the host's power-restore-delay and power-restore-wait units did during this boot
+logRestoreUnits() {
+  local unit name started finished status secs
+  for unit in power-restore-delay.service power-restore-wait.service; do
+    name=${unit%.service}
+    # Not installed, not enabled or no dbus -- already reported by logRestoreUnitSettings
+    [ "$(unitProperty "$unit" Unit LoadState)" == "loaded" ] || continue
+    [ "$(unitProperty "$unit" Unit UnitFileState)" == "enabled" ] || continue
     if [ "$(unitProperty "$unit" Unit ConditionTimestampMonotonic)" == "0" ]; then
       log_event "start.sh: $name: didn't run this boot (enabled after boot?)"
       continue
@@ -246,6 +281,8 @@ logRestoreUnits() {
     fi
   done
 }
+
+logRestoreUnitSettings
 
 # Capture power failure state before removing the killpower flag
 POWER_FAILURE_RESTART=false

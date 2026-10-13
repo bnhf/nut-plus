@@ -211,7 +211,14 @@ sudo systemd-analyze verify /etc/systemd/system/power-restore-delay.service /etc
 
 Don't test by creating a `killpower` file by hand -- upsmon checks the file for its own marker, and a fake one makes it disable the power down flag until the container restarts.
 
-After a power failure, nut-plus reads each unit's result from the host's systemd (via the dbus socket it already mounts) and adds it to its own log, for example:
+On every start, nut-plus logs whether each unit is installed and enabled, and the settings in the installed copies (times and `ConditionPathExists` path), for example:
+
+```
+start.sh: power-restore-delay: enabled -- boot delay 60s (start timeout 90s), runs if /data/nut/killpower exists
+start.sh: power-restore-wait: enabled -- Docker wait up to 120s (start timeout 150s), runs if /data/nut/killpower exists
+```
+
+After a power failure, nut-plus also reads each unit's result from the host's systemd (via the dbus socket it already mounts) and adds it to its own log, for example:
 
 ```
 start.sh: power-restore-delay: held boot for 60s
