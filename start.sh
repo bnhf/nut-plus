@@ -25,7 +25,7 @@ NUT_HOST="${NUT_HOST:-localhost}"
 log_event "start.sh: Container starting"
 
 # Check if /etc/nut files exist, and copy them from /opt/nut if they don't
-files=( nut.conf ups.conf upsd.conf upsd.users upsmon.conf upssched.conf upssched-cmd testemail testshutdown power-restore-delay.service power-restore-wait.service )
+files=( nut.conf ups.conf upsd.conf upsd.users upsmon.conf upssched.conf upssched-cmd testemail testshutdown power-restore-delay.service power-restore-wait.service install-power-restore )
 
 for file in "${files[@]}"; do
   if [ ! -f /etc/nut/$file ] || [[ $UPDATE_CONFIGS == "true" ]]; then
@@ -38,7 +38,7 @@ for file in "${files[@]}"; do
   fi
 done
 
-chmod +x /etc/nut/*-cmd /etc/nut/test*
+chmod +x /etc/nut/*-cmd /etc/nut/test* /etc/nut/install-power-restore
 
 echo -e "\n----------------------------------------\n"
 
