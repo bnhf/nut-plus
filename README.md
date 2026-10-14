@@ -178,7 +178,7 @@ nut-plus includes two small systemd units for the Docker host that fix this. Bot
 
 NUT isn't monitoring the UPS while these units wait, so the total delay is capped at about 3 minutes.
 
-nut-plus copies both units to your persistent directory (e.g. `/data/nut/`) on every start.
+nut-plus copies both units, and the `install-power-restore` script that installs them, to your persistent directory (e.g. `/data/nut/`) on every start.
 
 ### Compatibility
 
@@ -194,13 +194,28 @@ Not supported: Ubuntu 18.04 (systemd 237), Docker installed as a snap (its servi
 
 ### Install
 
+Run the script on the Docker host (not inside the container), from your persistent directory:
+
 ```bash
-sudo cp /data/nut/power-restore-delay.service /data/nut/power-restore-wait.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable power-restore-delay.service power-restore-wait.service
+sudo /data/nut/install-power-restore
 ```
 
-If your `HOST_DIR` isn't `/data`, edit the `ConditionPathExists` line (and `RequiresMountsFor` in `power-restore-delay.service`) in the copies under `/etc/systemd/system/` before running `daemon-reload`. Edit the installed copies, not the ones in your persistent directory -- nut-plus overwrites those on start when `UPDATE_CONFIGS=true`.
+It prompts for the two values -- press Enter to keep the value shown in brackets:
+
+```
+Boot delay in seconds (fixed pause before networking starts) [60]:
+Docker wait limit in seconds (until DNS and the clock are ready) [120]:
+```
+
+Each value can be 0 to 600 seconds, and 0 turns that unit off. The script works out the `killpower` path from its own location, so it's correct whatever your `HOST_DIR` is, then installs and enables the units and checks them with `systemd-analyze verify`. Run it again at any time to change the values -- the prompts show the installed values. The new values take effect on the next power-failure boot.
+
+To set the values without prompts (e.g. when setting up several hosts the same way):
+
+```bash
+sudo /data/nut/install-power-restore --delay 60 --wait 120
+```
+
+The script checks that it's running as root on the host, that systemd is 239 or later, and that Docker runs as `docker.service`. `--help` lists all options.
 
 To check the installation without rebooting:
 
@@ -242,9 +257,7 @@ sudo systemctl restart systemd-journald
 ### Remove
 
 ```bash
-sudo systemctl disable power-restore-delay.service power-restore-wait.service
-sudo rm /etc/systemd/system/power-restore-delay.service /etc/systemd/system/power-restore-wait.service
-sudo systemctl daemon-reload
+sudo /data/nut/install-power-restore --remove
 ```
 
-`systemctl status power-restore-delay power-restore-wait` should then report both units as not found.
+It asks for confirmation first (add `--yes` to skip it), then disables and deletes both units. `systemctl status power-restore-delay power-restore-wait` should then report both units as not found.
